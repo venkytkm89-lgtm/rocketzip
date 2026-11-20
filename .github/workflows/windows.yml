@@ -1,0 +1,170 @@
+# Builds RocketZip.exe, rocketzip-cli.exe and RocketZip-Setup.exe on GitHub's
+# Windows machines.
+#  * Every push: download them from the run's "Artifacts" section.
+#  * Push a version tag (v1.0.0, matching the version in rocketzip/Cargo.toml):
+#    a GitHub Release is created with the installer, a portable zip and
+#    SHA-256 checksums, and (if set up) the new version is sent to winget.
+name: Windows build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege: building only needs to read the code.
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Check the programs need nothing pre-installed
+        shell: pwsh
+        run: |
+          foreach ($f in "target\release\RocketZip.exe", "target\release\rocketzip-cli.exe") {
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($f))
+            if ($text -match "(?i)vcruntime140|msvcp140|api-ms-win-crt-") {
+              throw "$f depends on the Visual C++ runtime - static linking failed"
+            }
+            Write-Host "$f : no Visual C++ runtime needed"
+          }
+
+      - name: Smoke test (command line)
+        shell: pwsh
+        run: |
+          target\release\rocketzip-cli.exe a $env:TEMP\smoke.zfx README.md
+          target\release\rocketzip-cli.exe t $env:TEMP\smoke.zfx
+          if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+
+      - name: Smoke test (window starts without a graphics card)
+        shell: pwsh
+        run: |
+          $p = Start-Process target\release\RocketZip.exe -PassThru
+          Start-Sleep -Seconds 15
+          if ($p.HasExited) { throw "RocketZip.exe exited early (code $($p.ExitCode))" }
+          Stop-Process -Id $p.Id
+          Write-Host "window started"
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path rocketzip\Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          if ("${{ github.ref }}" -like "refs/tags/v*" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "Tag ${{ github.ref_name }} does not match version $v in rocketzip/Cargo.toml"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v"
+
+      - name: Generate third-party notices
+        run: python tools/gen_notices.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = @("/DAppVersion=${{ steps.ver.outputs.version }}",
+                    "/DAppURL=${{ github.server_url }}/${{ github.repository }}")
+          if ("${{ vars.PUBLISHER_NAME }}") { $iscc += "/DAppPublisher=${{ vars.PUBLISHER_NAME }}" }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" @iscc installer\rocketzip.iss
+          if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
+
+      - name: Test installer (silent install, use, uninstall)
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer\Output\*.exe | Select-Object -First 1
+          Start-Process $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER" -Wait
+          $dir = "$env:LOCALAPPDATA\Programs\RocketZip"
+          if (-not (Test-Path "$dir\rocketzip-cli.exe")) { throw "install failed: $dir" }
+          & "$dir\rocketzip-cli.exe" a $env:TEMP\inst.zfx README.md
+          & "$dir\rocketzip-cli.exe" t $env:TEMP\inst.zfx
+          if ($LASTEXITCODE -ne 0) { throw "installed program failed" }
+          Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          # The uninstaller hands off to a temporary copy, so wait for the files to go.
+          for ($i = 0; $i -lt 30 -and (Test-Path "$dir\RocketZip.exe"); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\RocketZip.exe") { throw "uninstall left files behind" }
+          Write-Host "install / uninstall OK"
+
+      - name: Package release files
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory dist, portable | Out-Null
+          Copy-Item target\release\RocketZip.exe, target\release\rocketzip-cli.exe, README.md, PRIVACY.md, THIRD-PARTY-NOTICES.txt portable\
+          Copy-Item LICENSE portable\LICENSE.txt
+          Compress-Archive portable\* "dist\RocketZip-$v-portable-x64.zip"
+          Copy-Item installer\Output\*.exe dist\
+          Push-Location dist
+          Get-ChildItem -File | ForEach-Object {
+            "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RocketZip-windows
+          path: dist/*
+
+  # Creates the GitHub Release when a version tag is pushed.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: RocketZip-windows
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: RocketZip ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
+
+  # Sends the new version to winget (Windows Package Manager).
+  # One-time setup (see README, "Publishing"): submit the first version by hand
+  # with wingetcreate, then add repository variable WINGET_ID (e.g. YourName.RocketZip)
+  # and secret WINGET_TOKEN (a classic GitHub token with public_repo scope).
+  winget:
+    if: startsWith(github.ref, 'refs/tags/v') && vars.WINGET_ID != ''
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - name: Submit update to microsoft/winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if (-not $env:WINGET_TOKEN) { throw "secret WINGET_TOKEN is not set" }
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          $url = "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/RocketZip-Setup-$v.exe"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update "${{ vars.WINGET_ID }}" --version $v --urls $url --submit --token $env:WINGET_TOKEN
+
+  # Checks every library RocketZip uses against the RustSec vulnerability database.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
