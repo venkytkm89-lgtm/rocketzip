@@ -45,8 +45,9 @@ jobs:
         shell: pwsh
         run: |
           target\release\rocketzip-cli.exe a $env:TEMP\smoke.zfx README.md
+          if ($LASTEXITCODE -ne 0) { throw "creating the archive failed" }
           target\release\rocketzip-cli.exe t $env:TEMP\smoke.zfx
-          if ($LASTEXITCODE -ne 0) { throw "smoke test failed" }
+          if ($LASTEXITCODE -ne 0) { throw "testing the archive failed" }
 
       - name: Smoke test (window starts without a graphics card)
         shell: pwsh
@@ -91,8 +92,9 @@ jobs:
           $dir = "$env:LOCALAPPDATA\Programs\RocketZip"
           if (-not (Test-Path "$dir\rocketzip-cli.exe")) { throw "install failed: $dir" }
           & "$dir\rocketzip-cli.exe" a $env:TEMP\inst.zfx README.md
+          if ($LASTEXITCODE -ne 0) { throw "installed program could not create an archive" }
           & "$dir\rocketzip-cli.exe" t $env:TEMP\inst.zfx
-          if ($LASTEXITCODE -ne 0) { throw "installed program failed" }
+          if ($LASTEXITCODE -ne 0) { throw "installed program could not test the archive" }
           Start-Process "$dir\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
           # The uninstaller hands off to a temporary copy, so wait for the files to go.
           for ($i = 0; $i -lt 30 -and (Test-Path "$dir\RocketZip.exe"); $i++) { Start-Sleep 1 }
@@ -109,7 +111,8 @@ jobs:
           Compress-Archive portable\* "dist\RocketZip-$v-portable-x64.zip"
           Copy-Item installer\Output\*.exe dist\
           Push-Location dist
-          Get-ChildItem -File | ForEach-Object {
+          # List the files first, so SHA256SUMS.txt doesn't end up hashing itself.
+          (Get-ChildItem -File) | ForEach-Object {
             "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
