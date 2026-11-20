@@ -1,0 +1,19 @@
+[package]
+name = "zfcm"
+version = "1.0.0"
+edition = "2021"
+description = "RocketZip Max context-mixing engine (Rust port of zfcm.c, byte-identical output)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "zfcm"
+# cdylib -> zfcm.dll / libzfcm.so / libzfcm.dylib, a drop-in for the C build
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "zfcm-tool"
+path = "src/main.rs"
+
+[dependencies]   # none: standard library only
+
