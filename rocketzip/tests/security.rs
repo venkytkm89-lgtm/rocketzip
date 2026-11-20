@@ -140,8 +140,12 @@ fn unsafe_names_in_every_format_are_blocked() {
     zw.finish().unwrap();
     let dest = t.path().join("d");
     extract_archive(&arc, Some(&dest), None, true, None).unwrap();
-    assert!(dest.join("ok.txt").exists());
-    assert!(!dest.join("a").exists() && !dest.join("C:").exists());
+    // Only ok.txt may be written. (List the folder instead of testing dest.join("C:"):
+    // on Windows that path means "current folder on drive C:", which always exists.)
+    let names: Vec<String> = fs::read_dir(&dest).unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["ok.txt".to_string()], "unexpected files: {names:?}");
 }
 
 #[test]
