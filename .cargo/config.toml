@@ -1,0 +1,7 @@
+# Build the Microsoft C runtime into the .exe files (static CRT), so they run on
+# any Windows 10/11 PC without installing the Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
